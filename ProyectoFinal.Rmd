@@ -1,0 +1,350 @@
+---
+title: "ProyectoFinal"
+author: 
+- "Allan Martínez Muñoz"
+- "Priscilla Rivera"
+date: "2022-12-2"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(readr)
+library(sp)
+library(raster)
+library(spatstat)
+library(maptools)
+library(tidyverse)
+library(plotrix)
+library(rgdal)
+library(dplyr)
+library(stringi)
+library(readxl)
+options(scipen=999)
+```
+
+# rio cuarto grecia
+# puerto jimenes golfito
+
+```{r}
+homicidios <- read_delim("Datos/Homocidios.csv", 
+    delim = ";", escape_double = FALSE, locale = locale(encoding = "ISO-8859-1"), 
+    trim_ws = TRUE)
+
+poblacioncantonal <- read_excel("Datos/poblacioncantonal.xlsx", 
+    col_names = TRUE)
+
+sp <- rgdal::readOGR("Datos/gadm36_CRI_2.shp")
+mapa <- sp
+mapa$NAME_2
+```
+
+```{r}
+Cantones = as.data.frame(mapa$NAME_2)  
+Cantones$NAME_2 = Cantones$`mapa$NAME_2`
+
+homicidios$Canton = stri_trans_totitle(homicidios$Canton)
+homicidios$Canton = as.factor(homicidios$Canton)
+levels(homicidios$Canton)[levels(homicidios$Canton)=="Montes De Oca"] ="Montes de Oca"
+levels(homicidios$Canton)[levels(homicidios$Canton)=="Montes De Oro"] ="Montes de Oro"
+levels(homicidios$Canton)[levels(homicidios$Canton)=="Puerto Jimenez"] ="Golfito"
+levels(homicidios$Canton)[levels(homicidios$Canton)=="Rio Cuarto"] ="Grecia"
+levels(homicidios$Canton)[levels(homicidios$Canton)=="Paraiso"] ="Paraíso"
+levels(homicidios$Canton)[levels(homicidios$Canton)=="San Ramon"] ="San Ramón"
+levels(homicidios$Canton)[levels(homicidios$Canton)=="Quepos"] ="Aguirre"
+
+homicidios1 = homicidios %>% mutate(cantidad = 1) %>%  group_by(Canton) %>% 
+              summarise(cantidad = sum(cantidad))
+
+homicidios1 = homicidios1 %>% rename(NAME_2 = Canton)
+
+
+poblacioncantonal$Canton = stri_trans_totitle(poblacioncantonal$Canton)
+poblacioncantonal$Canton = as.factor(poblacioncantonal$Canton)
+levels(poblacioncantonal$Canton)[levels(poblacioncantonal$Canton)=="Montes De Oca"] ="Montes de Oca"
+levels(poblacioncantonal$Canton)[levels(poblacioncantonal$Canton)=="Montes De Oro"] ="Montes de Oro"
+levels(poblacioncantonal$Canton)[levels(poblacioncantonal$Canton)=="Puerto Jimenez"] ="Golfito"
+levels(poblacioncantonal$Canton)[levels(poblacioncantonal$Canton)=="Zarcero"] ="Alfaro Ruiz"
+levels(poblacioncantonal$Canton)[levels(poblacioncantonal$Canton)=="Vásquez De Coronado"] ="Vásquez de Coronado"
+
+poblacioncantonal1 = poblacioncantonal %>% group_by(Canton) %>% 
+              summarise(Total = sum(Total))
+
+poblacioncantonal1 = poblacioncantonal1 %>% rename(NAME_2 = Canton)
+
+homicidios2 = full_join(homicidios1,poblacioncantonal1,by="NAME_2")
+```
+
+
+```{r}
+
+homicidios2 = full_join(Cantones,homicidios2,by="NAME_2")
+homicidios2 = homicidios2[,c(2:4)]
+homicidios2[is.na(homicidios2)] <- 0
+
+homicidios2 = homicidios2 %>% rename(Homicidios = cantidad,Poblacion = Total)
+homicidios2 = homicidios2 %>% mutate(r = (Homicidios/Poblacion)*100000) #homicidios por 100.000 hab
+mapa@data=data.frame(homicidios2)
+
+```
+
+
+```{r}
+spplot(mapa,c("cantidad"),
+       cuts=10 ,scales=list(draw = TRUE),ylim=c(7,13),main = "title", sub = "subt")
+
+vals <- mapa$cantidad
+# compute breaks (equivalent to `do.log = TRUE`)
+breaks <- c(min(vals),
+            round(tail(head(exp(seq(min(log(vals+0.01)), max(log(vals)), length=10)), -1), -1),1),
+            max(vals))
+
+breaks <- c(0,1,10,20,30,40,50,60)
+breaks
+categories <- cut(vals, breaks, dig.lab=4, include.lowest=TRUE)
+
+# add factor column to `SpatialPointsDataFrame`
+mapa$cantidad_cat <- forcats::fct_rev(categories)  # reverse order
+
+spplot(mapa, "cantidad_cat", key.space = list(x = 0.1, y = 0.95, corner = c(0, 1))
+       ,scales=list(draw = TRUE),ylim=c(7,13),main = "title", sub = "subt")
+spplot(mapa, "cantidad_cat")
+
+```
+
+#Modelo
+
+```{r}
+library(INLA) 
+
+# install.packages("INLA",repos=c(getOption("repos"),INLA="https://inla.r-inla-download.org/R/stable"), dep=TRUE)
+
+
+prior.prec <- list(prec = list(prior = "pc.prec",
+                               param = c(1, 0.01))) 
+formula <- Homicidios ~ f(NAME_2, model = "iid", hyper = prior.prec) 
+
+mod <- inla(formula,
+            data = homicidios2,
+            family = "binomial", Ntrials = Poblacion,
+            control.predictor = list(compute = TRUE),
+            control.compute = list(dic = TRUE)
+)
+
+summary(mod) 
+mod$summary.fixed 
+mod$summary.hyperpar 
+mod$summary.fitted.values 
+mod$summary.random
+
+```
+
+#Mapa vecinal
+
+```{r}
+library(SpatialEpi)
+library(spdep)
+
+#map = mapa@polygons
+
+nb <- poly2nb(mapa)
+
+d <- data.frame(canton = mapa$NAME_2, neigh = rep(0, length(mapa)))
+
+rownames(d) <- mapa$NAME_2
+
+mapa1 <- SpatialPolygonsDataFrame(mapa, d, match.ID = FALSE)
+
+mapa1$neigh[nb[[1]]] <- 0
+mapa1$neigh[nb[[2]]] <- 0 
+mapa1$neigh[nb[[3]]] <- 0 
+mapa1$neigh[nb[[4]]] <- 0 
+mapa1$neigh[nb[[5]]] <- 0 
+
+nb[[8]]
+
+library(ggplot2) 
+mapsf <- st_as_sf(mapa1)
+ggplot(mapsf) + geom_sf(aes(fill = as.factor(neigh))) 
+
+```
+
+```{r}
+library(dplyr)
+d <- group_by(mapa@data, NAME_2) %>% summarize(Y = sum(Homicidios))
+head(d)
+
+```
+
+esperado
+
+```{r}
+E <- expected(
+population = mapa@data[["Poblacion"]],
+cases = mapa@data[["Homicidios"]], n.strata = 1
+)
+
+# E <- expected(
+# population = mapa@data[["Poblacion"]],
+# cases = mapa@data[["Homicidios"]], n.strata = 16
+# )
+```
+
+```{r}
+d$E <- E[match(d$NAME_2, unique(mapa@data[["NAME_2"]]))]
+head(d)
+d$SIR <- d$Y / d$E
+map <- merge(mapa, d)
+
+```
+
+```{r}
+mapsf <- st_as_sf(map)
+
+```
+
+```{r}
+ggplot(mapsf) + geom_sf(aes(fill = SIR)) +
+scale_fill_gradient2(
+midpoint = 1, low = "blue", mid = "white", high = "red"
+) +
+theme_bw()
+
+```
+
+### Spatial small area risk estimation
+
+Modelos que permitan tomar prestada información de áreas vecinas e incorporar información de covariables que resulten en la suavización o reducción de los valores extremos en función de tamaños de muestra pequeños.
+
+Un modelo espacial popular en aplicaciones de mapeo de enfermedades es el modelo Besag-York Mollié (BYM) (Besag et al., 1991). En este modelo, al efecto aleatorio espacial $u_i$ se le asigna una distribución autorregresiva condicional (CAR) que suaviza los datos de acuerdo con una determinada estructura de vecindad que especifica que dos áreas son vecinas si comparten un límite común.
+
+BYM MODEL
+
+```{r}
+formula <- Y ~
+f(idareau, model = "besag", graph = g, scale.model = TRUE) +
+f(idareav, model = "iid")
+
+# Los efectos aleatorios f()
+
+# idareau: componente espacialmente estructurado con variable índice e igual a c(1, 2, ..., I)
+# modelo "besag" con distribución CAR (condicional autoregresiva)
+# estructura de vecindad dada por el grafo g
+# La opción scale.model = TRUE se utiliza para hacer comparable el parámetro de precisión de modelos con diferentes CAR anteriores
+# idareav: componente no estructurado con variable índice e igual a c(1, 2, ..., I)
+# modelo "iid"
+
+
+
+```
+
+Modelo BYM 2
+hace que los parámetros sean interpretables y facilita la asignación de antecedentes de complejidad penalizada (PC) significativos.
+
+```{r}
+formula <- Y ~ f(idarea, model = "bym2", graph = g)
+```
+
+```{r}
+map$idarea <- 1:nrow(map@data)
+```
+
+```{r}
+prior <- list(
+prec = list(
+prior = "pc.prec",
+param = c(0.5 / 0.31, 0.01)),
+phi = list(
+prior = "pc",
+param = c(0.5, 2 / 3))
+)
+```
+
+lista de vecinos nb
+
+```{r}
+nb <- poly2nb(map)
+head(nb)
+```
+
+Objeto g con la matriz de "vecindad" que se usará en el efecto espacialmente estructurado.
+
+```{r}
+nb2INLA("map.adj", nb)
+g <- inla.read.graph(filename = "map.adj")
+
+```
+
+Modelo BYM 2
+
+```{r}
+formula <- Y ~ f(idarea, model = "bym2", graph = g, hyper = prior)
+```
+
+
+```{r}
+res <- inla(formula,
+family = "poisson", data = map@data,
+E = E, control.predictor = list(compute = TRUE)
+)
+```
+
+```{r}
+summary(res)
+```
+
+```{r}
+head(res$summary.fitted.values)
+```
+
+Asignamos media al riesgo relativo, y 0.025quant y 0.975quant a los límites superior e inferior de los intervalos creíbles del 95% de los riesgos relativos.
+
+```{r}
+map$RR <- res$summary.fitted.values[, "mean"]
+map$LL <- res$summary.fitted.values[, "0.025quant"]
+map$UL <- res$summary.fitted.values[, "0.975quant"]
+summary(map@data[, c("RR", "LL", "UL")])
+```
+
+```{r}
+mapsf <- st_as_sf(map)
+gRR <- ggplot(mapsf) + geom_sf(aes(fill = RR)) +
+scale_fill_gradient2(
+midpoint = 1, low = "blue", mid = "white", high = "red",
+limits = c(0.7, 1.5)
+) +
+theme_bw()
+
+gLL <- ggplot(mapsf) + geom_sf(aes(fill = LL)) +
+scale_fill_gradient2(
+midpoint = 1, low = "blue", mid = "white", high = "red",
+limits = c(0.7, 1.5)
+) +
+theme_bw()
+
+gUL <- ggplot(mapsf) + geom_sf(aes(fill = UL)) +
+scale_fill_gradient2(
+midpoint = 1, low = "blue", mid = "white", high = "red",
+limits = c(0.7, 1.5)
+) +
+theme_bw()
+
+```
+
+```{r}
+library(cowplot)
+plot_grid(gRR, gLL, gUL, ncol = 1)
+
+```
+
+```{r}
+mapsf$re <- res$summary.random$idarea[1:81, "mean"]
+ggplot(mapsf) + geom_sf(aes(fill = re)) +
+scale_fill_gradient2(
+midpoint = 0, low = "blue", mid = "white", high = "red"
+) +
+theme_bw()
+```
+
