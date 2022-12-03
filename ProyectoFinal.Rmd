@@ -22,11 +22,19 @@ library(rgdal)
 library(dplyr)
 library(stringi)
 library(readxl)
+library(ggplot2)
+library(cowplot)
+
+# install.packages("INLA",repos=c(getOption("repos"),INLA="https://inla.r-inla-download.org/R/stable"), dep=TRUE)
+
+library(INLA)
+library(SpatialEpi)
+library(spdep)
+
 options(scipen=999)
 ```
 
-# rio cuarto grecia
-# puerto jimenes golfito
+# Cargarlos datos
 
 ```{r}
 homicidios <- read_delim("Datos/Homocidios.csv", 
@@ -38,10 +46,13 @@ poblacioncantonal <- read_excel("Datos/poblacioncantonal.xlsx",
 
 sp <- rgdal::readOGR("Datos/gadm36_CRI_2.shp")
 mapa <- sp
-mapa$NAME_2
+mapa2 <- sp
 ```
 
 ```{r}
+ProvinciaCanton = as.data.frame(sp@data[["NAME_1"]]) 
+ProvinciaCanton$Canton = sp@data[["NAME_2"]]
+ProvinciaCanton = ProvinciaCanton %>% rename(Provincia = `sp@data[["NAME_1"]]`)
 Cantones = as.data.frame(mapa$NAME_2)  
 Cantones$NAME_2 = Cantones$`mapa$NAME_2`
 
@@ -90,106 +101,60 @@ mapa@data=data.frame(homicidios2)
 
 ```
 
+# Descriptivos
 
 ```{r}
-spplot(mapa,c("cantidad"),
+sum(homicidios2$Homicidios) # total de homicidios
+
+homicidios %>% distinct(Fecha) %>% count() # días totales
+
+sum(homicidios2$Homicidios) / homicidios %>% distinct(Fecha) %>% count()
+
+(sum(homicidios2$Homicidios) / sum(poblacioncantonal1$Total)) * 100000
+
+```
+
+# mapa con la cantidad de homicidios en grupos
+
+```{r}
+spplot(mapa,c("Homicidios"),
        cuts=10 ,scales=list(draw = TRUE),ylim=c(7,13),main = "title", sub = "subt")
 
-vals <- mapa$cantidad
-# compute breaks (equivalent to `do.log = TRUE`)
+vals <- mapa$Homicidios
+
 breaks <- c(min(vals),
             round(tail(head(exp(seq(min(log(vals+0.01)), max(log(vals)), length=10)), -1), -1),1),
             max(vals))
 
 breaks <- c(0,1,10,20,30,40,50,60)
-breaks
+
 categories <- cut(vals, breaks, dig.lab=4, include.lowest=TRUE)
 
-# add factor column to `SpatialPointsDataFrame`
 mapa$cantidad_cat <- forcats::fct_rev(categories)  # reverse order
 
-spplot(mapa, "cantidad_cat", key.space = list(x = 0.1, y = 0.95, corner = c(0, 1))
-       ,scales=list(draw = TRUE),ylim=c(7,13),main = "title", sub = "subt")
-spplot(mapa, "cantidad_cat")
-
+ggplot() + geom_sf(data = st_as_sf(mapa), aes(fill = cantidad_cat)) +
+  viridis::scale_fill_viridis(discrete = TRUE) + theme_bw()+
+      coord_sf(
+        ylim = c(11.50, 8.00),
+        clip = "on",
+        expand = F
+      )
 ```
 
-#Modelo
+# Calcular la razón de incidencia estandarizada (SIR)
 
 ```{r}
-library(INLA) 
-
-# install.packages("INLA",repos=c(getOption("repos"),INLA="https://inla.r-inla-download.org/R/stable"), dep=TRUE)
-
-
-prior.prec <- list(prec = list(prior = "pc.prec",
-                               param = c(1, 0.01))) 
-formula <- Homicidios ~ f(NAME_2, model = "iid", hyper = prior.prec) 
-
-mod <- inla(formula,
-            data = homicidios2,
-            family = "binomial", Ntrials = Poblacion,
-            control.predictor = list(compute = TRUE),
-            control.compute = list(dic = TRUE)
-)
-
-summary(mod) 
-mod$summary.fixed 
-mod$summary.hyperpar 
-mod$summary.fitted.values 
-mod$summary.random
-
-```
-
-#Mapa vecinal
-
-```{r}
-library(SpatialEpi)
-library(spdep)
-
-#map = mapa@polygons
-
-nb <- poly2nb(mapa)
-
-d <- data.frame(canton = mapa$NAME_2, neigh = rep(0, length(mapa)))
-
-rownames(d) <- mapa$NAME_2
-
-mapa1 <- SpatialPolygonsDataFrame(mapa, d, match.ID = FALSE)
-
-mapa1$neigh[nb[[1]]] <- 0
-mapa1$neigh[nb[[2]]] <- 0 
-mapa1$neigh[nb[[3]]] <- 0 
-mapa1$neigh[nb[[4]]] <- 0 
-mapa1$neigh[nb[[5]]] <- 0 
-
-nb[[8]]
-
-library(ggplot2) 
-mapsf <- st_as_sf(mapa1)
-ggplot(mapsf) + geom_sf(aes(fill = as.factor(neigh))) 
-
-```
-
-```{r}
-library(dplyr)
 d <- group_by(mapa@data, NAME_2) %>% summarize(Y = sum(Homicidios))
 head(d)
-
 ```
 
-esperado
+### Calculo de los esperados
 
 ```{r}
 E <- expected(
 population = mapa@data[["Poblacion"]],
 cases = mapa@data[["Homicidios"]], n.strata = 1
 )
-
-# E <- expected(
-# population = mapa@data[["Poblacion"]],
-# cases = mapa@data[["Homicidios"]], n.strata = 16
-# )
 ```
 
 ```{r}
@@ -198,58 +163,36 @@ head(d)
 d$SIR <- d$Y / d$E
 map <- merge(mapa, d)
 
+d %>% filter(SIR > 1.00) %>% count()
+
 ```
 
 ```{r}
 mapsf <- st_as_sf(map)
-
 ```
+
+### mapa SIR
 
 ```{r}
-ggplot(mapsf) + geom_sf(aes(fill = SIR)) +
-scale_fill_gradient2(
-midpoint = 1, low = "blue", mid = "white", high = "red"
-) +
-theme_bw()
+ggplot() + geom_sf(data = mapsf, aes(fill = SIR)) +
+  scale_fill_viridis_c(direction = -1) + theme_bw()+
+      coord_sf(
+        ylim = c(11.50, 8.00),
+        clip = "on",
+        expand = F
+      )
 
 ```
 
-### Spatial small area risk estimation
+# Modelo BYM 2
 
-Modelos que permitan tomar prestada información de áreas vecinas e incorporar información de covariables que resulten en la suavización o reducción de los valores extremos en función de tamaños de muestra pequeños.
-
-Un modelo espacial popular en aplicaciones de mapeo de enfermedades es el modelo Besag-York Mollié (BYM) (Besag et al., 1991). En este modelo, al efecto aleatorio espacial $u_i$ se le asigna una distribución autorregresiva condicional (CAR) que suaviza los datos de acuerdo con una determinada estructura de vecindad que especifica que dos áreas son vecinas si comparten un límite común.
-
-BYM MODEL
-
-```{r}
-formula <- Y ~
-f(idareau, model = "besag", graph = g, scale.model = TRUE) +
-f(idareav, model = "iid")
-
-# Los efectos aleatorios f()
-
-# idareau: componente espacialmente estructurado con variable índice e igual a c(1, 2, ..., I)
-# modelo "besag" con distribución CAR (condicional autoregresiva)
-# estructura de vecindad dada por el grafo g
-# La opción scale.model = TRUE se utiliza para hacer comparable el parámetro de precisión de modelos con diferentes CAR anteriores
-# idareav: componente no estructurado con variable índice e igual a c(1, 2, ..., I)
-# modelo "iid"
-
-
-
-```
-
-Modelo BYM 2
-hace que los parámetros sean interpretables y facilita la asignación de antecedentes de complejidad penalizada (PC) significativos.
-
-```{r}
-formula <- Y ~ f(idarea, model = "bym2", graph = g)
-```
+Crear id por canton
 
 ```{r}
 map$idarea <- 1:nrow(map@data)
 ```
+
+Definir la distribución priori
 
 ```{r}
 prior <- list(
@@ -261,8 +204,6 @@ prior = "pc",
 param = c(0.5, 2 / 3))
 )
 ```
-
-lista de vecinos nb
 
 ```{r}
 nb <- poly2nb(map)
@@ -277,26 +218,81 @@ g <- inla.read.graph(filename = "map.adj")
 
 ```
 
-Modelo BYM 2
+Formula del modelo BYM 2
 
 ```{r}
 formula <- Y ~ f(idarea, model = "bym2", graph = g, hyper = prior)
 ```
 
+Ajuste del modelo
 
 ```{r}
 res <- inla(formula,
 family = "poisson", data = map@data,
-E = E, control.predictor = list(compute = TRUE)
+E = E, control.predictor = list(compute = TRUE),
+control.compute = list(dic = TRUE,return.marginals.predictor=TRUE)
 )
 ```
 
 ```{r}
 summary(res)
+``` 
+
+```{r}  
+#Tomamos la media de los cantones de acuerdo al modelo res
+nb <- poly2nb(map)
+m=res$summary.fitted.values[,1] 
+#Ahora hacemos una matriz de distancia de las medias
+d=as.matrix(dist(m)) 
+#De acuerdo a la matriz como no todos estan relacionados en el vencidario utilizamos nb y de acuerdo a mp2_dll dara la distancia de los vecindarios, posteriormente se ordenara de mayor a menor para obtener los cantones de los vecindarios con mayor diferencia.
+map2_dbl(.x=1:81,
+    .y=nb,
+    .f=function(.x,.y){
+      max(d[.x,.y])
+    }) |> order(decreasing=TRUE)  
+#Se consideran los 10 cantones con mayor diferencia en sus vecindarios y se les asigna un 1 y se representan en el mapa, estos cantones son: Limon, Perez zeledon, Pariso, Talamanca, Matina, Siquirres, Guacimo, Abangares, Puntarenas y Orotina.
+
+d <- data.frame(county = map$NAME_2, neigh = rep(0, length(mapa)))
+mapa1 <- SpatialPolygonsDataFrame(map, d, match.ID = FALSE)
+mapa1$neigh[nb[[46]]] <- 1
+mapa1$neigh[nb[[74]]] <- 1 
+mapa1$neigh[nb[[23]]] <- 1 
+mapa1$neigh[nb[[50]]] <- 1 
+mapa1$neigh[nb[[47]]] <- 1 
+mapa1$neigh[nb[[49]]] <- 1 
+mapa1$neigh[nb[[45]]] <- 1 
+mapa1$neigh[nb[[24]]] <- 1 
+mapa1$neigh[nb[[61]]] <- 1 
+mapa1$neigh[nb[[38]]] <- 1 
+
+library(ggplot2) 
+mapsf <- st_as_sf(mapa1)
+ggplot(mapsf) + geom_sf(aes(fill =as.factor(neigh))) +ggtitle("Mapa de los 10  vecindarios 
+con mayor diferencia de homicidios")
+
+
+
 ```
 
+#Grafico de barras de los 10 vecindarios
+
 ```{r}
-head(res$summary.fitted.values)
+Vecindarios=c( "Heredia","Puntarenas","Abangares","Guácimo","Siquirres","Matina","Talamanca","Paraíso","Pérez Zeledón","Limón") 
+Promedios=sort(m)[72:81]
+df = data.frame(Vecindarios,Promedios) 
+ggplot(data=df, aes(x=Vecindarios, y=Promedios))+geom_bar(stat="identity", position="stack")+ggtitle("Gráfico de los 10 vecindarios 
+con mayor diferencia de homicidios")
+
+```
+
+### Cantones con los medias posteriores más altas de las tasas de homicidios
+
+```{r}
+head(res$summary.fitted.values %>% arrange(desc(mean)),10)
+
+res$summary.fitted.values %>% filter(mean > 1.00) %>% count()
+res$summary.fitted.values %>% filter(mean < 1.00) %>% arrange()
+
 ```
 
 Asignamos media al riesgo relativo, y 0.025quant y 0.975quant a los límites superior e inferior de los intervalos creíbles del 95% de los riesgos relativos.
@@ -311,40 +307,149 @@ summary(map@data[, c("RR", "LL", "UL")])
 ```{r}
 mapsf <- st_as_sf(map)
 gRR <- ggplot(mapsf) + geom_sf(aes(fill = RR)) +
-scale_fill_gradient2(
-midpoint = 1, low = "blue", mid = "white", high = "red",
-limits = c(0.7, 1.5)
-) +
-theme_bw()
+scale_fill_viridis_c(direction = -1) +
+theme_bw()+
+      coord_sf(
+        ylim = c(11.50, 8.00),
+        clip = "on",
+        expand = F
+      )
 
 gLL <- ggplot(mapsf) + geom_sf(aes(fill = LL)) +
 scale_fill_gradient2(
-midpoint = 1, low = "blue", mid = "white", high = "red",
-limits = c(0.7, 1.5)
+midpoint = 2, low = "green", mid = "orange", high = "red",
+limits = c(0, 6)
 ) +
-theme_bw()
+theme_bw()+
+      coord_sf(
+        ylim = c(11.50, 8.00),
+        clip = "on",
+        expand = F
+      )
 
 gUL <- ggplot(mapsf) + geom_sf(aes(fill = UL)) +
 scale_fill_gradient2(
-midpoint = 1, low = "blue", mid = "white", high = "red",
-limits = c(0.7, 1.5)
+midpoint = 2, low = "green", mid = "orange", high = "red",
+limits = c(0, 6)
 ) +
-theme_bw()
+theme_bw()+
+      coord_sf(
+        ylim = c(11.50, 8.00),
+        clip = "on",
+        expand = F
+      )
 
 ```
 
 ```{r}
-library(cowplot)
-plot_grid(gRR, gLL, gUL, ncol = 1)
+plot_grid(gLL,gRR,gUL, nrow = 1)
+gRR
+```
+
+# Mapas provinciales
+
+```{r}
+map@data$Canton = map@data$NAME_2
+mapap = left_join(map@data,ProvinciaCanton,by=c("Canton"))
+
+mapaprovinias = sp
+mapaprovinias@data=data.frame(mapap)
+
+mapaprovinias@data %>% group_by(Provincia) %>% 
+  summarise(
+            min = round(min(RR),1),
+            media = round(mean(RR),1),
+            max = round(max(RR),1)
+            )
 
 ```
 
 ```{r}
-mapsf$re <- res$summary.random$idarea[1:81, "mean"]
-ggplot(mapsf) + geom_sf(aes(fill = re)) +
-scale_fill_gradient2(
-midpoint = 0, low = "blue", mid = "white", high = "red"
-) +
+ggplot() + geom_sf(data = st_as_sf(mapaprovinias[mapaprovinias@data$Provincia == "San José",]), aes(fill = RR)) + 
+  scale_fill_viridis_c(direction = -1)   +
+  labs(title = "Riesgo Relativo de homicidios en los cantones de la provincia de San José")
+```
+
+```{r}
+ggplot() + geom_sf(data = st_as_sf(mapaprovinias[mapaprovinias@data$Provincia == "Alajuela",]),
+                   aes(fill = RR)) + scale_fill_viridis_c(direction = -1)    +
+  labs(title = "Riesgo Relativo de homicidios en los cantones de la provincia de Alajuela")
+```
+
+```{r}
+ggplot() + geom_sf(data = st_as_sf(mapaprovinias[mapaprovinias@data$Provincia == "Puntarenas",]),
+                   aes(fill = RR)) +  scale_fill_viridis_c(direction = -1) +
+  labs(title = "Riesgo Relativo de homicidios en los cantones de la provincia de Puntarenas")
+```
+
+```{r}
+ggplot() + geom_sf(data = st_as_sf(mapaprovinias[mapaprovinias@data$Provincia == "Guanacaste",]),
+                   aes(fill = RR)) +  scale_fill_viridis_c(direction = -1) +
+  labs(title = "Riesgo Relativo de homicidios en los cantones de la provincia de Guanacaste")
+```
+
+```{r}
+ggplot() + geom_sf(data = st_as_sf(mapaprovinias[mapaprovinias@data$Provincia == "Heredia",]),
+                   aes(fill = RR)) +  scale_fill_viridis_c(direction = -1) +
+  labs(title = "Riesgo Relativo de homicidios en los cantones de la provincia de Heredia")
+```
+
+```{r}
+ggplot() + geom_sf(data = st_as_sf(mapaprovinias[mapaprovinias@data$Provincia == "Limón",]),
+                   aes(fill = RR)) +  scale_fill_viridis_c(direction = -1) +
+  labs(title = "Riesgo Relativo de homicidios en los cantones de la provincia de Limón")
+```
+
+```{r}
+ggplot() + geom_sf(data = st_as_sf(mapaprovinias[mapaprovinias@data$Provincia == "Cartago",]),
+                   aes(fill = RR)) + scale_fill_viridis_c(direction = -1) +
+  labs(title = "Riesgo Relativo de homicidios en los cantones de la provincia de Cartago")
+```
+
+### Marginales
+
+```{r}
+alpha <- res$marginals.fixed[[1]] # intercepto posterior
+
+# Densidad marginal
+ggplot(data.frame(inla.smarginal(alpha)), aes(x, y)) +
+geom_line() +
 theme_bw()
 ```
 
+```{r}
+quant <- inla.qmarginal(0.05, alpha)
+inla.pmarginal(quant, alpha)
+```
+
+```{r}
+marg.variance <- inla.tmarginal(function(x) 1/x,
+res$marginals.hyperpar$"Precision for idarea")
+```
+
+### Tasa de homicidios para cada canton
+
+```{r}
+list_marginals <- res$marginals.fitted.values
+
+marginals <- data.frame(do.call(rbind, list_marginals))
+marginals$idarea <- rep(names(list_marginals),
+times = sapply(list_marginals, nrow))
+```
+
+
+```{r}
+ggplot(marginals, aes(x = x, y = y)) + geom_line() +
+facet_wrap(~ idarea) +
+labs(x = "", y = "Density") +
+geom_vline(xintercept = 1, col = "gray") +
+theme_bw()
+
+```
+
+# Probabilidad de que la tasa de mortalidad por homicidios sea mayor a 1
+
+```{r}
+sapply(res$marginals.fitted.values,
+FUN = function(marg){1-inla.pmarginal(q = 1, marginal = marg)})
+```
