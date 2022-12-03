@@ -1,1 +1,1 @@
-# EstEspacial
+# Estadística Espacial
